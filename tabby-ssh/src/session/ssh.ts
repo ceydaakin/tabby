@@ -20,6 +20,7 @@ import { supportedAlgorithms } from '../algorithms'
 import { requestShellPTY, SSHShellChannelOptions } from './shellChannel'
 import * as russh from 'russh'
 import { selectNextAuthMethod, updateAuthPlanAfterFailure } from './authMethodSelection'
+import { createChannelOpQueue } from './channelOpQueue'
 
 const WINDOWS_OPENSSH_AGENT_PIPE = '\\\\.\\pipe\\openssh-ssh-agent'
 
@@ -910,14 +911,15 @@ export class SSHSession {
             },
         })
 
+        // Socket → Channel writes, EOF and close go through one queue so they reach the channel in order
+        const channelOps = createChannelOpQueue(err => {
+            this.logger.error(`${logPrefix}: channel write error: ${err}`)
+            socket.destroy(new Error(`${logPrefix}failed to write to channel: ${err}`))
+        })
+
         // Socket → Channel data flow with proper conversion
         socket.on('data', data => {
-            try {
-                channel.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
-            } catch (err) {
-                this.logger.error(`${logPrefix}: channel write error: ${err}`)
-                socket.destroy(new Error(`${logPrefix}failed to write to channel: ${err}`))
-            }
+            channelOps.push(() => channel.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)))
         })
 
         // Handle EOF from remote
@@ -941,13 +943,13 @@ export class SSHSession {
         // Handle socket close
         socket.on('close', () => {
             this.logger.debug(`${logPrefix}: socket closed, closing channel`)
-            channel.close()
+            channelOps.push(() => channel.close())
         })
 
         // Handle EOF from local
         socket.on('end', () => {
             this.logger.debug(`${logPrefix}: socket end, sending EOF to channel`)
-            channel.eof()
+            channelOps.push(() => channel.eof())
         })
     }
 
