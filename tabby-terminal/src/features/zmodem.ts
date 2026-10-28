@@ -5,6 +5,7 @@ import { EnvironmentInjector, inject, Injectable } from '@angular/core'
 import { TerminalDecorator } from '../api/decorator'
 import { BaseTerminalTabComponent } from '../api/baseTerminalTab.component'
 import { SessionMiddleware } from '../api/middleware'
+import { ZModemWriteBatcher } from './zmodemWriteBatcher'
 import { LogService, Logger, PlatformService, FileUpload, TranslateService } from 'tabby-core'
 
 const SPACER = '            '
@@ -215,7 +216,10 @@ class ZModemMiddleware extends SessionMiddleware {
             canceled = true
         })
 
-        let writeQueue: Promise<void> = Promise.resolve()
+        const writer = new ZModemWriteBatcher(
+            data => transfer.write(data),
+            err => this.logger.error('Zmodem write error', err),
+        )
         let receivedBytes = 0
         let lastUpdateTime = 0
 
@@ -236,17 +240,13 @@ class ZModemMiddleware extends SessionMiddleware {
                             this.showMessage(colors.bgYellow.black(` ${percentStr}% `) + ' ' + details.name, true)
                         }
 
-                        writeQueue = writeQueue
-                            .then(() => transfer.write(Buffer.from(chunk)))
-                            .catch(err => {
-                                this.logger.error('Zmodem write error', err)
-                            })
+                        writer.push(chunk)
                     },
                 }),
                 this.cancelEvent.pipe(first()).toPromise(),
             ])
 
-            await writeQueue
+            await writer.flush()
 
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (canceled) {
